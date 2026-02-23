@@ -1,4 +1,4 @@
-PHASE1_VERSION = "phase1_v1.0"
+PHASE1_VERSION = "phase1_v2.1"
 
 CONFIG_COLUMNS = [
     "family_id",
@@ -35,3 +35,15 @@ METRIC_COLUMNS = [
     "fp64_safe_flag",
     "spd_fail_flag",
 ]
+
+# Stored separately from METRIC_COLUMNS — not part of the numeric tensor.
+# Written as its own column in the CSV only.
+ERROR_COLUMN = "error_msg"
+
+# Maps scaling_id integer (from config tensor) to ScaleType string
+SCALING_ID_MAP = {
+    0: "constant",
+    1: "linear",
+    2: "sqrt",
+    3: "power",
+}

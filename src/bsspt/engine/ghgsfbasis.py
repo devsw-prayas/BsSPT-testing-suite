@@ -40,112 +40,101 @@ class GHGSFMultiLobeBasis:
         self.m_sigma = sigma
         self.m_order = order
 
-        self.m_K = len(centers)        # number of lobes
-        self.m_N = order               # Hermite order
-        self.m_M = self.m_K * self.m_N # total basis functions
+        self.m_K = len(centers)
+        self.m_N = order
+        self.m_M = self.m_K * self.m_N
 
-        self.m_basisRaw = None  # [M, L]
-        self.m_gram = None      # [M, M]
-        self.m_chol = None      # [M, M]
+        self.m_basisRaw = None
+        self.m_gram = None
+        self.m_chol = None
 
         self._buildBasis()
         self._buildGram()
         self._buildCholesky()
 
     # ---------------------------------------------------------
-    # Basis Construction
+    # Basis Construction — fully batched across all K centers
+    # Previously: K*N separate hermiteBasis calls in nested loops
+    # Now: single batched call on [K*N, L], diagonal gather
     # ---------------------------------------------------------
 
     def _buildBasis(self):
 
-        lbda = self.m_domain.m_lambda
-        sigma = self.m_sigma
-        centers = self.m_centers
+        lbda    = self.m_domain.m_lambda    # [L]
+        sigma   = self.m_sigma
+        centers = self.m_centers            # [K]
+        device  = lbda.device
+        dtype   = lbda.dtype
+        K       = self.m_K
+        N       = self.m_N
+        L       = lbda.shape[0]
 
-        lambda_exp = lbda.unsqueeze(0)       # [1, L]
-        center_exp = centers.unsqueeze(1)    # [K, 1]
+        # Normalization constants for orders 0..N-1
+        n_idx      = torch.arange(N, device=device, dtype=dtype)
+        factorials = torch.exp(torch.lgamma(n_idx + 1))
+        sqrt_pi    = torch.tensor(torch.pi, device=device, dtype=dtype).sqrt()
+        norms      = torch.sqrt((2.0 ** n_idx) * factorials * sqrt_pi)  # [N]
 
-        x = (lambda_exp - center_exp) / sigma  # [K, L]
+        # x[k, l] = (lambda[l] - centers[k]) / sigma  =>  [K, L]
+        x = (lbda.unsqueeze(0) - centers.unsqueeze(1)) / sigma   # [K, L]
 
-        H = hermiteBasis(self.m_N, x)          # [K, N, L]
+        # Expand x to [K, N, L] by repeating for each order, then flatten
+        # x_full[k, n, l] = x[k, l]  (same x, different Hermite order applied)
+        x_rep  = x.unsqueeze(1).expand(K, N, L)                  # [K, N, L]
+        x_flat = x_rep.reshape(K * N, L)                          # [K*N, L]
 
-        # Normalization factors
-        n = torch.arange(
-            self.m_N,
-            device=lbda.device,
-            dtype=lbda.dtype
-        )
+        # Single batched Hermite call
+        H_full = hermiteBasis(N, x_flat)                          # [K*N, N, L]
 
-        factorial = torch.exp(torch.lgamma(n + 1))
-        sqrt_pi = torch.sqrt(torch.tensor(torch.pi, device=lbda.device, dtype=lbda.dtype))
+        # For row r = k*N + n we need H[r, n, :] (order-n polynomial)
+        row_idx = torch.arange(K * N, device=device)
+        ord_idx = row_idx % N
+        H_diag  = H_full[row_idx, ord_idx, :]                    # [K*N, L]
 
-        norm = torch.sqrt((2.0 ** n) * factorial * sqrt_pi)
-        norm = norm.unsqueeze(0).unsqueeze(-1)  # [1, N, 1]
+        # Gaussian envelopes using the original x (not x_flat which repeats)
+        # x_flat[k*N+n, :] == x[k, :] for all n, so we can tile x directly
+        x_tiled  = x.unsqueeze(1).expand(K, N, L).reshape(K * N, L)
+        gaussian = torch.exp(-0.5 * x_tiled ** 2)                # [K*N, L]
 
-        gaussian = torch.exp(-0.5 * x ** 2).unsqueeze(1)  # [K, 1, L]
+        # Tile norms [N] -> [K*N]
+        norms_tiled = norms.repeat(K)                             # [K*N]
 
-        phi = (H * gaussian) / norm  # [K, N, L]
-
-        self.m_basisRaw = phi.reshape(self.m_M, -1)  # [M, L]
+        self.m_basisRaw = (H_diag * gaussian) / norms_tiled.unsqueeze(1)  # [M, L]
 
     # ---------------------------------------------------------
     # Gram Matrix
     # ---------------------------------------------------------
 
     def _buildGram(self):
-
         B = self.m_basisRaw
         w = self.m_domain.m_weights
-
-        weighted = B * w   # broadcast over λ
-        self.m_gram = weighted @ B.T  # [M, M]
+        self.m_gram = (B * w) @ B.T
 
     # ---------------------------------------------------------
-    # Cholesky (SPD metric)
+    # Cholesky
     # ---------------------------------------------------------
 
     def _buildCholesky(self):
-
-        # G must be symmetric positive definite
         self.m_chol = torch.linalg.cholesky(self.m_gram)
 
     # ---------------------------------------------------------
-    # Projection
+    # Projection  — solve G alpha = b  via Cholesky
     # ---------------------------------------------------------
 
     def project(self, spectrum: Tensor) -> Tensor:
-        """
-        Project spectrum f(λ) onto basis.
-
-        Returns coefficients α solving:
-
-            G α = b
-        """
 
         B = self.m_basisRaw
         w = self.m_domain.m_weights
 
         if spectrum.device != B.device:
             spectrum = spectrum.to(B.device)
-
         if spectrum.dtype != B.dtype:
             spectrum = spectrum.to(B.dtype)
 
-        b = (B * w) @ spectrum  # [M]
+        b = ((B * w) @ spectrum).unsqueeze(1)   # [M, 1]
 
-        b = b.unsqueeze(1)  # [M, 1]
-
-        y = torch.linalg.solve_triangular(
-            self.m_chol,
-            b,
-            upper=False
-        )
-
-        alpha = torch.linalg.solve_triangular(
-            self.m_chol.T,
-            y,
-            upper=True
-        )
+        y     = torch.linalg.solve_triangular(self.m_chol,   b, upper=False)
+        alpha = torch.linalg.solve_triangular(self.m_chol.T, y, upper=True)
 
         return alpha.squeeze(1)
 
@@ -154,17 +143,11 @@ class GHGSFMultiLobeBasis:
     # ---------------------------------------------------------
 
     def reconstruct(self, coeffs: Tensor) -> Tensor:
-        """
-        Reconstruct spectrum from coefficients:
-
-            f(λ) = α^T B
-        """
 
         B = self.m_basisRaw
 
         if coeffs.device != B.device:
             coeffs = coeffs.to(B.device)
-
         if coeffs.dtype != B.dtype:
             coeffs = coeffs.to(B.dtype)
 

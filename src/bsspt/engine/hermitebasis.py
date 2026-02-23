@@ -13,6 +13,8 @@ def hermiteBasis(order: int, x: Tensor) -> Tensor:
         Number of basis functions (N).
     x : Tensor
         Shape [K, L] input locations.
+        K = number of centers (batch dimension)
+        L = number of wavelength samples
 
     Returns
     -------
@@ -24,17 +26,11 @@ def hermiteBasis(order: int, x: Tensor) -> Tensor:
     K, L = x.shape
     N = order
 
-    H = torch.zeros(
-        (K, N, L),
-        device=x.device,
-        dtype=x.dtype
-    )
+    H = torch.zeros((K, N, L), device=x.device, dtype=x.dtype)
 
-    # H_0 = 1
     H[:, 0, :] = 1.0
 
     if N > 1:
-        # H_1 = 2x
         H[:, 1, :] = 2.0 * x
 
     for n in range(2, N):

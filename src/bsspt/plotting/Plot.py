@@ -394,7 +394,8 @@ class MultiPanelEngine:
     def __init__(self, nrows: int, ncols: int = 1,
                  figsize: Tuple[float, float] = (10, 12),
                  sharex: bool = False,
-                 compact: bool = False):
+                 compact: bool = False,
+                 projection=None):
         """
         Initialize multi-panel engine.
 
@@ -413,18 +414,20 @@ class MultiPanelEngine:
         self.m_axes = []
         self.m_panels = []
         self.m_compact = compact
-
+        self.m_projection = projection
         self.internalInitializePanels()
 
     def internalInitializePanels(self) -> None:
         """Create figure with grid layout (supports both vertical stacking and grid)."""
         # Create subplots with optimized spacing
         self.m_figure, axesArray = plt.subplots(
-            self.m_nrows, self.m_ncols,
+            self.m_nrows,
+            self.m_ncols,
             figsize=self.m_figsize,
             sharex=self.m_sharex,
             facecolor=PlotEngine.s_colors['figure_bg'],
-            constrained_layout=True
+            constrained_layout=True,
+            subplot_kw={'projection': self.m_projection} if self.m_projection else None
         )
 
         # Flatten axes array for consistent indexing
@@ -660,3 +663,41 @@ plt.rcParams['mathtext.default'] = 'regular'
 plt.rcParams['figure.autolayout'] = False
 plt.rcParams['axes.titlepad'] = 8
 plt.rcParams['axes.labelpad'] = 6
+
+
+class SurfaceEngine(PlotEngine):
+    """
+    3D surface plotting engine built on top of PlotEngine.
+    Designed for spectral stability surfaces and phase manifolds.
+    """
+
+    def internalInitializeFigure(self) -> None:
+        self.m_figure = plt.figure(figsize=self.m_figsize,
+                                   facecolor=self.s_colors['figure_bg'])
+        self.m_axes = self.m_figure.add_subplot(111, projection='3d')
+        self.m_axes.set_facecolor(self.s_colors['axes_bg'])
+
+    def addSurface(self,
+                   X: np.ndarray,
+                   Y: np.ndarray,
+                   Z: np.ndarray,
+                   cmap: str = 'viridis',
+                   alpha: float = 0.95):
+
+        surf = self.m_axes.plot_surface(
+            X, Y, Z,
+            cmap=cmap,
+            linewidth=0,
+            antialiased=True,
+            alpha=alpha
+        )
+
+        self.m_figure.colorbar(surf, shrink=0.6, aspect=12)
+
+    def setLabels(self, xlabel: str, ylabel: str, zlabel: str):
+        self.m_axes.set_xlabel(xlabel)
+        self.m_axes.set_ylabel(ylabel)
+        self.m_axes.set_zlabel(zlabel)
+
+    def setView(self, elev: float = 30, azim: float = 45):
+        self.m_axes.view_init(elev=elev, azim=azim)
